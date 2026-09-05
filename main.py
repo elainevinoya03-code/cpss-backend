@@ -8,6 +8,8 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import Settings, get_settings
+from routers.auth import router as auth_router
+from routers.users import router as users_router
 
 # psycopg 3 async mode requires a SelectorEventLoop on Windows;
 # uvicorn's default ProactorEventLoop raises a RuntimeError.
@@ -29,6 +31,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
+app.include_router(users_router)
 
 
 @app.get("/")

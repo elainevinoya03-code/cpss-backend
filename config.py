@@ -4,12 +4,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """App configuration loaded from environment variables (.env)."""
 
-    # Supabase credentials
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
     SUPABASE_SECRET_KEY: str = ""
-
-    # PostgreSQL (Supabase connection string)
     DATABASE_URL: str = ""
 
     APP_NAME: str = "CPSS Backend"
@@ -18,13 +15,17 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"  # Ignores unneeded variables in .env
+        extra="ignore"
     )
 
 
 def get_settings() -> Settings:
-    # Tinanggal muna ang @lru_cache para agad nitong mabasa ang bawat pagbabago sa .env
-    return Settings()
+    s = Settings()
+    # Mag-print tayo sa terminal para makita ang totoong value
+    print("--- DEBUG READ FROM SETTINGS ---")
+    print("DATABASE_URL:", s.DATABASE_URL)
+    print("--------------------------------")
+    return s
 
 
 settings = get_settings()
