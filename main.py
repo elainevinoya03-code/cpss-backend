@@ -22,11 +22,16 @@ app = FastAPI(title="CPSS Backend")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "https://cpss-frontend.vercel.app",
 ]
+
+# Allow Vercel preview deployments (e.g. cpss-frontend-git-main-cpss.vercel.app)
+origin_regex = r"^https://cpss-frontend(-[a-z0-9-]+)?\.vercel\.app$"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=origin_regex,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
