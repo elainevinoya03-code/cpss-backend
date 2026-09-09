@@ -23,6 +23,10 @@ class LoginResponse(BaseModel):
     active: bool
     twoFactor: str
     lastLogin: str
+    birthday: str = ""
+    sex: str = ""
+    civilStatus: str = ""
+    address: str = ""
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -62,6 +66,11 @@ async def login(req: LoginRequest):
                 (now_str, user["id"]),
             )
 
+    birthday = ""
+    if user.get("birthday"):
+        b = user["birthday"]
+        birthday = b.isoformat() if hasattr(b, "isoformat") else str(b)
+
     return LoginResponse(
         id=user["id"],
         userId=user["user_id"],
@@ -73,4 +82,8 @@ async def login(req: LoginRequest):
         active=user["active"],
         twoFactor=user["two_factor"],
         lastLogin=user["last_login"] or "—",
+        birthday=birthday,
+        sex=user["sex"] or "",
+        civilStatus=user["civil_status"] or "",
+        address=user["address"] or "",
     )

@@ -16,6 +16,10 @@ class UserCreate(BaseModel):
     purok: str = ""
     sendInvite: bool = True
     password: str = ""
+    birthday: str = ""
+    sex: str = ""
+    civilStatus: str = ""
+    address: str = ""
 
 
 class UserUpdate(BaseModel):
@@ -24,6 +28,10 @@ class UserUpdate(BaseModel):
     phone: str = ""
     role: str
     purok: str = ""
+    birthday: str = ""
+    sex: str = ""
+    civilStatus: str = ""
+    address: str = ""
 
 
 class UserOut(BaseModel):
@@ -38,6 +46,10 @@ class UserOut(BaseModel):
     twoFactor: str
     lastLogin: str
     sendInvite: bool = False
+    birthday: str = ""
+    sex: str = ""
+    civilStatus: str = ""
+    address: str = ""
 
 
 PRIVILEGED_ROLES = {"Admin", "Captain", "Desk Officer"}
@@ -47,6 +59,7 @@ ROLE_ID_PREFIXES = {
     "Captain": "CA",
     "Desk Officer": "DO",
     "CCTV Operator": "CO",
+    "Chief Tanod": "CT",
     "Tanod": "TA",
     "Purok Leader": "PL",
     "Resident": "RE",
@@ -66,6 +79,10 @@ async def _generate_user_id(role: str, conn) -> str:
 
 
 def _row_to_out(row: dict) -> UserOut:
+    birthday = ""
+    if row.get("birthday"):
+        b = row["birthday"]
+        birthday = b.isoformat() if hasattr(b, "isoformat") else str(b)
     return UserOut(
         id=row["id"],
         userId=row["user_id"],
@@ -77,6 +94,10 @@ def _row_to_out(row: dict) -> UserOut:
         active=row["active"],
         twoFactor=row["two_factor"],
         lastLogin=row["last_login"] or "—",
+        birthday=birthday,
+        sex=row["sex"] or "",
+        civilStatus=row["civil_status"] or "",
+        address=row["address"] or "",
     )
 
 
@@ -96,7 +117,7 @@ async def create_user(req: UserCreate):
     if not name or not email:
         raise HTTPException(status_code=400, detail="Name and email are required")
 
-    needs_purok = req.role in ("Tanod", "Purok Leader", "Resident")
+    needs_purok = req.role in ("Chief Tanod", "Tanod", "Purok Leader", "Resident")
     if needs_purok and not req.purok:
         raise HTTPException(status_code=400, detail="Purok/Zone is required for this role")
 
@@ -117,11 +138,12 @@ async def create_user(req: UserCreate):
         two_factor = "pending" if privileged else "none"
 
         async with conn.cursor() as cur:
+            birthday = req.birthday.strip() if req.birthday else None
             await cur.execute(
-                """INSERT INTO users (user_id, name, email, phone, password, role, purok, active, two_factor, last_login)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s, '—')
+                """INSERT INTO users (user_id, name, email, phone, password, role, purok, active, two_factor, last_login, birthday, sex, civil_status, address)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, true, %s, '—', %s, %s, %s, %s)
                    RETURNING *""",
-                (user_id, name, email, req.phone.strip(), pw_hash, req.role, req.purok if needs_purok else "", two_factor),
+                (user_id, name, email, req.phone.strip(), pw_hash, req.role, req.purok if needs_purok else "", two_factor, birthday, req.sex, req.civilStatus, req.address.strip()),
             )
             row = await cur.fetchone()
 
@@ -137,7 +159,7 @@ async def update_user(user_id: int, req: UserUpdate):
     if not name or not email:
         raise HTTPException(status_code=400, detail="Name and email are required")
 
-    needs_purok = req.role in ("Tanod", "Purok Leader", "Resident")
+    needs_purok = req.role in ("Chief Tanod", "Tanod", "Purok Leader", "Resident")
     if needs_purok and not req.purok:
         raise HTTPException(status_code=400, detail="Purok/Zone is required for this role")
 
@@ -167,16 +189,29 @@ async def update_user(user_id: int, req: UserUpdate):
             two_factor = "none"
 
         async with conn.cursor() as cur:
+            birthday = req.birthday.strip() if req.birthday else None
             await cur.execute(
                 """UPDATE users
-                   SET name = %s, email = %s, phone = %s, role = %s, purok = %s, two_factor = %s, updated_at = now()
+                   SET name = %s, email = %s, phone = %s, role = %s, purok = %s, two_factor = %s, birthday = %s, sex = %s, civil_status = %s, address = %s, updated_at = now()
                    WHERE id = %s
                    RETURNING *""",
-                (name, email, req.phone.strip(), req.role, req.purok if needs_purok else "", two_factor, user_id),
+                (name, email, req.phone.strip(), req.role, req.purok if needs_purok else "", two_factor, birthday, req.sex, req.civilStatus, req.address.strip(), user_id),
             )
             row = await cur.fetchone()
 
     return _row_to_out(row)
+
+
+@router.delete("/{user_id}")
+async def delete_user(user_id: int):
+    async with get_db() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+            user = await cur.fetchone()
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            await cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+    return {"message": "User deleted successfully"}
 
 
 @router.patch("/{user_id}/toggle-active")
