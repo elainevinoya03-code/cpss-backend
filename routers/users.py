@@ -52,7 +52,7 @@ class UserOut(BaseModel):
     address: str = ""
 
 
-PRIVILEGED_ROLES = {"Admin", "Captain", "Desk Officer"}
+PRIVILEGED_ROLES = {"Admin", "Captain", "Desk Officer", "Executive Officer"}
 
 ROLE_ID_PREFIXES = {
     "Super Admin": "SA",
@@ -63,6 +63,7 @@ ROLE_ID_PREFIXES = {
     "Tanod": "TA",
     "Purok Leader": "PL",
     "Resident": "RE",
+    "Executive Officer": "EO",
 }
 
 
