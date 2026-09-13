@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from config import Settings, get_settings
 from routers.auth import router as auth_router
+from routers.reports import router as reports_router
 from routers.users import router as users_router
 
 # psycopg 3 async mode requires a SelectorEventLoop on Windows;
@@ -39,6 +40,7 @@ app.add_middleware(
 
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(reports_router)
 
 
 @app.get("/")
