@@ -20,12 +20,7 @@ class Settings(BaseSettings):
 
 
 def get_settings() -> Settings:
-    s = Settings()
-    # Mag-print tayo sa terminal para makita ang totoong value
-    print("--- DEBUG READ FROM SETTINGS ---")
-    print("DATABASE_URL:", s.DATABASE_URL)
-    print("--------------------------------")
-    return s
+    return Settings()
 
 
 settings = get_settings()

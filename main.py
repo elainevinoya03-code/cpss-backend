@@ -11,9 +11,12 @@ from config import Settings, get_settings
 from routers.auth import router as auth_router
 from routers.reports import router as reports_router
 from routers.users import router as users_router
+from routers.digital_boundaries import router as digital_boundaries_router
 
 # psycopg 3 async mode requires a SelectorEventLoop on Windows;
-# uvicorn's default ProactorEventLoop raises a RuntimeError.
+# uvicorn's default ProactorEventLoop raises a RuntimeError/InterfaceError.
+# Applied at import time so `python main.py`, `python -m uvicorn main:app`, and
+# the STAT reloader worker (which imports this module) all get the policy.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -24,6 +27,7 @@ origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://cpss-frontend.vercel.app",
+    "https://cpss.culiatpublicsafety.com",
 ]
 
 # Allow Vercel preview deployments (e.g. cpss-frontend-git-main-cpss.vercel.app)
@@ -41,6 +45,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(reports_router)
+app.include_router(digital_boundaries_router)
 
 
 @app.get("/")
