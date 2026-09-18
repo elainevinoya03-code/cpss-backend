@@ -12,6 +12,11 @@ from routers.auth import router as auth_router
 from routers.reports import router as reports_router
 from routers.users import router as users_router
 from routers.digital_boundaries import router as digital_boundaries_router
+from routers.patrol_configuration import router as patrol_configuration_router
+from routers.incidents import router as incidents_router
+from routers.roster_members import router as roster_members_router
+
+from cctv import router as cctv_router
 
 # psycopg 3 async mode requires a SelectorEventLoop on Windows;
 # uvicorn's default ProactorEventLoop raises a RuntimeError/InterfaceError.
@@ -26,6 +31,10 @@ app = FastAPI(title="CPSS Backend")
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "https://cpss-frontend.vercel.app",
     "https://cpss.culiatpublicsafety.com",
 ]
@@ -46,6 +55,10 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(reports_router)
 app.include_router(digital_boundaries_router)
+app.include_router(patrol_configuration_router)
+app.include_router(incidents_router)
+app.include_router(roster_members_router)
+app.include_router(cctv_router)
 
 
 @app.get("/")
@@ -124,4 +137,4 @@ async def health_check(settings: Settings = Depends(get_settings)):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
