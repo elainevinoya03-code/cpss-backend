@@ -126,6 +126,7 @@ class IncidentBase(BaseModel):
     resolved_at: Optional[str] = None
     iot_data: Optional[dict] = None
     feedback: Optional[str] = None
+    created_at: Optional[str] = None
 
 
 class IncidentCreate(IncidentBase):
@@ -347,8 +348,8 @@ async def create_incident(incident: IncidentCreate):
                     reporter_safe_at, validation_label, related_alert_id, closed_reason,
                     verification_status, verified_by, verified_at, unverified_reason,
                     category_history, assigned_team, dispatch_id, closure_history,
-                    resolved_at, iot_data, feedback
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    resolved_at, iot_data, feedback, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     report_id = EXCLUDED.report_id,
                     category = EXCLUDED.category,
@@ -387,7 +388,7 @@ async def create_incident(incident: IncidentCreate):
                     incident.closed_reason, incident.verification_status, incident.verified_by,
                     incident.verified_at, incident.unverified_reason, incident.category_history,
                     incident.assigned_team, incident.dispatch_id, incident.closure_history,
-                    incident.resolved_at, incident.iot_data, incident.feedback
+                    incident.resolved_at, incident.iot_data, incident.feedback, incident.created_at or datetime.now().isoformat()
                 )
             )
 
@@ -509,6 +510,7 @@ def _incident_from_report_dict(report: dict, photos_count: int) -> dict:
         "resolved_at": None,
         "iot_data": None,
         "feedback": None,
+        "created_at": datetime.now().isoformat(),
     }
 
 
@@ -562,8 +564,8 @@ async def create_incident_from_report(report_id: int):
                     reporter_safe_at, validation_label, related_alert_id, closed_reason,
                     verification_status, verified_by, verified_at, unverified_reason,
                     category_history, assigned_team, dispatch_id, closure_history,
-                    resolved_at, iot_data, feedback
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    resolved_at, iot_data, feedback, created_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     incident["id"], incident["report_id"], incident["category"],
@@ -580,6 +582,7 @@ async def create_incident_from_report(report_id: int):
                     incident["verified_at"], incident["unverified_reason"], incident["category_history"],
                     incident["assigned_team"], incident["dispatch_id"], incident["closure_history"],
                     incident["resolved_at"], incident["iot_data"], incident["feedback"],
+                    incident["created_at"],
                 ),
             )
 
