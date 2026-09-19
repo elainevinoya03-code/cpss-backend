@@ -66,6 +66,7 @@ class PatrolScheduleCreate(BaseModel):
     id: str
     code: str
     planId: str
+    operationalScheduleId: str = ""
     startDate: str
     endDate: str = ""
     startTime: str
@@ -89,6 +90,7 @@ class PatrolScheduleCreate(BaseModel):
 class PatrolScheduleUpdate(BaseModel):
     code: Optional[str] = None
     planId: Optional[str] = None
+    operationalScheduleId: Optional[str] = None
     startDate: Optional[str] = None
     endDate: Optional[str] = None
     startTime: Optional[str] = None
@@ -214,6 +216,7 @@ def _schedule_row_to_out(row: dict) -> dict:
         "id": row["id"],
         "code": row["code"],
         "planId": row["plan_id"],
+        "operationalScheduleId": str(row.get("operational_schedule_id") or ""),
         "startDate": _iso(row.get("start_date")),
         "endDate": _iso(row.get("end_date")),
         "startTime": _iso(row.get("start_time")),
@@ -331,10 +334,237 @@ async def _team_exists(conn, team_id: str) -> bool:
         return await cur.fetchone() is not None
 
 
+async def _active_team_member_conflicts(
+    conn, candidate_ids: List[str], exclude_team_id: str
+) -> List[str]:
+    """Member ids already taken by another ACTIVE team (excluding `exclude_team_id`).
+
+    Deleting/deactivating a team (or removing the member from it) frees the
+    member again because inactive/deleted rows are not considered.
+    """
+    ids = [m for m in dict.fromkeys(candidate_ids) if m]
+    if not ids:
+        return []
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "SELECT member_ids, leader_id FROM patrol_teams WHERE is_active = TRUE AND id <> %s",
+            (exclude_team_id,),
+        )
+        rows = await cur.fetchall()
+    taken = set()
+    for r in rows:
+        for mid in _norm_json(r.get("member_ids"), []) or []:
+            if mid:
+                taken.add(mid)
+        if r.get("leader_id"):
+            taken.add(r["leader_id"])
+    return [m for m in ids if m in taken]
+
+
+async def _roster_names(conn, ids: List[str]) -> dict:
+    if not ids:
+        return {}
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT id, name FROM roster_members WHERE id = ANY(%s)", (ids,))
+        rows = await cur.fetchall()
+    return {r["id"]: r.get("name") or r["id"] for r in rows}
+
+
+async def _reject_team_member_conflicts(conn, candidate_ids: List[str], exclude_team_id: str) -> None:
+    """409 when any candidate is already in another active team (no bypass)."""
+    conflicts = await _active_team_member_conflicts(conn, candidate_ids, exclude_team_id)
+    if conflicts:
+        names = await _roster_names(conn, conflicts)
+        labels = [names.get(m, m) for m in conflicts]
+        raise HTTPException(
+            status_code=409,
+            detail=f"Already assigned to another active team: {', '.join(labels)}",
+        )
+
+
 async def _schedule_exists(conn, schedule_id: str) -> bool:
     async with conn.cursor() as cur:
         await cur.execute("SELECT 1 FROM active_patrol_schedules WHERE id = %s", (schedule_id,))
         return await cur.fetchone() is not None
+
+
+# ── Operational Schedule linkage ──────────────────────────────────────
+# A patrol schedule must be created from an existing Operational Schedule
+# (the patrol_schedules row owned by its checkpoint plan) and stay inside
+# that schedule's date/time range and valid recurring dates.
+
+_PY_WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _parse_hhmm(value) -> Optional[int]:
+    import re as _re
+
+    m = _re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?$", str(value or "").strip())
+    if not m:
+        return None
+    h, minute = int(m.group(1)), int(m.group(2))
+    if h < 0 or h > 23 or minute < 0 or minute > 59:
+        return None
+    return h * 60 + minute
+
+
+def _split_window(start_min: int, end_min: int) -> list:
+    if start_min == end_min:
+        return []
+    return [[start_min, end_min]] if end_min > start_min else [[start_min, 1440], [0, end_min]]
+
+
+def _time_within(t: str, window_start: str, window_end: str) -> bool:
+    tm = _parse_hhmm(t)
+    sm = _parse_hhmm(window_start)
+    em = _parse_hhmm(window_end)
+    if tm is None or sm is None or em is None:
+        return False
+    if sm == em:
+        return False
+    for a0, a1 in _split_window(sm, em):
+        if a0 <= tm <= a1:
+            return True
+    return False
+
+
+def _dates_in_range(start: str, end: str, limit: int = 370) -> List[str]:
+    from datetime import date as _date
+
+    try:
+        y1, m1, d1 = [int(x) for x in str(start).split("-")]
+        y2, m2, d2 = [int(x) for x in str(end).split("-")]
+        d_start, d_end = _date(y1, m1, d1), _date(y2, m2, d2)
+    except Exception:
+        return []
+    if d_end < d_start or (d_end - d_start).days > limit:
+        return []
+    return [(d_start + __import__("datetime").timedelta(days=i)).isoformat() for i in range((d_end - d_start).days + 1)]
+
+
+def _op_occurrences(op_start: str, op_end: str, recurring: str, recurring_days) -> List[str]:
+    """Valid recurring dates generated by the Operational Schedule."""
+    days = _dates_in_range(op_start, op_end)
+    if recurring == "daily":
+        return days
+    if recurring == "specific_days":
+        want = {d for d in (recurring_days or []) if d}
+        if not want:
+            return []
+        from datetime import date as _date
+
+        out = []
+        for ds in days:
+            y, m, d = [int(x) for x in ds.split("-")]
+            if _PY_WEEKDAYS[_date(y, m, d).weekday()] in want:
+                out.append(ds)
+        return out
+    return [op_start] if op_start else []
+
+
+def _patrol_dates(start: str, end: str, frequency: str, frequency_days) -> List[str]:
+    end = end or start
+    days = _dates_in_range(start, end)
+    if frequency == "specific_days":
+        want = {d for d in (frequency_days or []) if d}
+        if not want:
+            return []
+        from datetime import date as _date
+
+        return [ds for ds in days if _PY_WEEKDAYS[_date(*[int(x) for x in ds.split("-")]).weekday()] in want]
+    if frequency in ("one_time", "custom"):
+        return [start] if start else []
+    return days
+
+
+async def _fetch_operational_schedule(conn, op_id: int):
+    async with conn.cursor() as cur:
+        await cur.execute("SELECT * FROM patrol_schedules WHERE id = %s", (op_id,))
+        return await cur.fetchone()
+
+
+async def _validate_operational_link(
+    conn,
+    *,
+    op_id_raw: str,
+    plan_id: str,
+    start_date: str,
+    end_date: str,
+    start_time: str,
+    end_time: str,
+    frequency: str,
+    frequency_days,
+    require_link: bool,
+    enforce_window: bool,
+) -> None:
+    """Enforce the Operational Schedule linkage for a patrol schedule.
+
+    - `require_link`: reject when no Operational Schedule is selected
+      (creating/activating a patrol schedule always requires one).
+    - existence of the linked row is always checked when an id is given, so
+      a deleted Operational Schedule blocks saves with a clear message.
+    - `enforce_window`: reject dates/times outside the Operational
+      Schedule's range and dates outside its valid recurring dates.
+    """
+    op_id_raw = (op_id_raw or "").strip()
+    if not op_id_raw:
+        if require_link:
+            raise HTTPException(
+                status_code=400,
+                detail="Select an existing Operational Schedule — a patrol schedule cannot be created without one",
+            )
+        return
+    try:
+        op_pk = int(op_id_raw)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid Operational Schedule reference")
+    op = await _fetch_operational_schedule(conn, op_pk)
+    if op is None:
+        raise HTTPException(
+            status_code=400,
+            detail="The linked Operational Schedule is no longer available — it was deleted or is invalid. Select a current Operational Schedule.",
+        )
+    if str(op.get("plan_id") or "") != str(plan_id or ""):
+        raise HTTPException(
+            status_code=400,
+            detail="The linked Operational Schedule does not belong to the selected checkpoint plan",
+        )
+    op_start = _iso(op.get("operation_date")) or ""
+    op_end = _iso(op.get("end_date")) or op_start
+    op_start_time = str(op.get("start_time") or "")
+    op_end_time = str(op.get("end_time") or "")
+    if not op_start or not op_start_time or not op_end_time:
+        raise HTTPException(
+            status_code=400,
+            detail="The linked Operational Schedule is no longer valid — update it in Patrol Configuration first",
+        )
+    if not enforce_window:
+        return
+    if frequency == "custom":
+        raise HTTPException(
+            status_code=400,
+            detail="Custom cadence cannot be verified against the Operational Schedule — pick a listed frequency within its dates",
+        )
+    if not start_date or not start_time or not end_time:
+        raise HTTPException(status_code=400, detail="Start date and start/end times are required")
+    end_date = end_date or start_date
+    if start_date < op_start or end_date > op_end or end_date < start_date:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Patrol dates must stay inside the Operational Schedule range {op_start} → {op_end}",
+        )
+    if not _time_within(start_time, op_start_time, op_end_time) or not _time_within(end_time, op_start_time, op_end_time):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Patrol times must stay inside the Operational Schedule window {op_start_time}–{op_end_time}",
+        )
+    occurrences = set(_op_occurrences(op_start, op_end, op.get("recurring") or "none", _norm_json(op.get("recurring_days"), [])))
+    for ds in _patrol_dates(start_date, end_date, frequency, frequency_days or []):
+        if ds not in occurrences:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Patrol date {ds} is not a valid recurring date of the Operational Schedule",
+            )
 
 
 # ── Teams ───────────────────────────────────────────────────────────────
@@ -361,12 +591,20 @@ async def upsert_team(team: PatrolTeamCreate):
         raise HTTPException(status_code=400, detail="Team id and name are required")
 
     leader_id = team.leaderId or None  # '' → NULL; patrol_teams.leader_id is nullable
+    raw_ids = ([leader_id] if leader_id else []) + list(team.memberIds or [])
+    if len(raw_ids) != len(set(raw_ids)):
+        raise HTTPException(status_code=400, detail="Duplicate members selected — each tanod can only appear once per team")
     member_ids = list(dict.fromkeys(team.memberIds))
     if leader_id and leader_id not in member_ids:
         member_ids = [leader_id, *member_ids]
 
     async with get_db() as conn:
         await _validate_team_refs(conn, leader_id, member_ids)
+        if team.isActive:
+            # Re-check at submit time against current DB state so a member who
+            # joined another active team concurrently (or a crafted payload
+            # bypassing the disabled UI) cannot be double-assigned.
+            await _reject_team_member_conflicts(conn, member_ids, team_id)
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT 1 FROM patrol_teams WHERE LOWER(name) = LOWER(%s) AND id <> %s",
@@ -405,12 +643,29 @@ async def update_team(team_id: str, patch: PatrolTeamUpdate):
     params = []
 
     async with get_db() as conn:
-        if not await _team_exists(conn, team_id):
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT * FROM patrol_teams WHERE id = %s", (team_id,))
+            current = await cur.fetchone()
+        if current is None:
             raise HTTPException(status_code=404, detail="Patrol team not found")
+
+        current_member_ids = _norm_json(current.get("member_ids"), []) or []
+        resulting_leader = patch.leaderId if patch.leaderId is not None else (current.get("leader_id") or "")
+        resulting_members = list(dict.fromkeys(patch.memberIds)) if patch.memberIds is not None else list(current_member_ids)
+        resulting_active = patch.isActive if patch.isActive is not None else bool(current.get("is_active"))
+        if resulting_leader and resulting_leader not in resulting_members:
+            resulting_members = [resulting_leader, *resulting_members]
 
         if patch.name is not None:
             if not patch.name.strip():
                 raise HTTPException(status_code=400, detail="Team name is required")
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT 1 FROM patrol_teams WHERE LOWER(name) = LOWER(%s) AND id <> %s",
+                    (patch.name.strip(), team_id),
+                )
+                if await cur.fetchone():
+                    raise HTTPException(status_code=400, detail="A team with this name already exists")
             fields.append("name = %s")
             params.append(patch.name.strip())
         if patch.leaderId is not None:
@@ -419,13 +674,21 @@ async def update_team(team_id: str, patch: PatrolTeamUpdate):
             fields.append("leader_id = %s")
             params.append(patch.leaderId or None)
         if patch.memberIds is not None:
-            member_ids = list(dict.fromkeys(patch.memberIds))
-            await _validate_team_refs(conn, patch.leaderId, member_ids)
+            raw_ids = ([resulting_leader] if resulting_leader else []) + list(patch.memberIds or [])
+            if len(raw_ids) != len(set(raw_ids)):
+                raise HTTPException(status_code=400, detail="Duplicate members selected — each tanod can only appear once per team")
+            await _validate_team_refs(conn, resulting_leader or None, resulting_members)
             fields.append("member_ids = %s")
-            params.append(Jsonb(member_ids))
+            params.append(Jsonb(resulting_members))
         if patch.isActive is not None:
             fields.append("is_active = %s")
             params.append(patch.isActive)
+
+        # Enforce single-active-team membership on any change that leaves the
+        # team active (member add, leader change, or reactivation).
+        if resulting_active and (patch.memberIds is not None or patch.leaderId is not None or patch.isActive is True):
+            await _validate_team_refs(conn, resulting_leader or None, resulting_members)
+            await _reject_team_member_conflicts(conn, resulting_members, team_id)
 
         if fields:
             fields.append("updated_at = now()")
@@ -509,18 +772,36 @@ async def upsert_schedule(schedule: PatrolScheduleCreate):
 
     async with get_db() as conn:
         await _validate_schedule_refs(conn, schedule.planId, schedule.teamId)
+        # The Schedule section is driven by the existing Operational Schedule:
+        # link is required except for drafts, existence is always checked so a
+        # deleted/invalid Operational Schedule blocks the save, and the
+        # date/time window is enforced whenever the schedule is activated.
+        await _validate_operational_link(
+            conn,
+            op_id_raw=schedule.operationalScheduleId,
+            plan_id=schedule.planId,
+            start_date=schedule.startDate,
+            end_date=schedule.endDate or schedule.startDate,
+            start_time=schedule.startTime,
+            end_time=schedule.endTime,
+            frequency=schedule.frequency,
+            frequency_days=schedule.frequencyDays,
+            require_link=schedule.status != "draft",
+            enforce_window=schedule.status != "draft",
+        )
         async with conn.cursor() as cur:
             await cur.execute(
                 """
                 INSERT INTO active_patrol_schedules (
-                    id, code, plan_id, start_date, end_date, start_time, end_time,
+                    id, code, plan_id, operational_schedule_id, start_date, end_date, start_time, end_time,
                     frequency, frequency_days, custom_notes, shift_type, team_id,
                     assignment_mode, assignments, ops, status, created_by,
                     submitted_at, decided_by, decided_at, notified_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (id) DO UPDATE SET
                     code            = EXCLUDED.code,
                     plan_id         = EXCLUDED.plan_id,
+                    operational_schedule_id = EXCLUDED.operational_schedule_id,
                     start_date      = EXCLUDED.start_date,
                     end_date        = EXCLUDED.end_date,
                     start_time      = EXCLUDED.start_time,
@@ -544,6 +825,7 @@ async def upsert_schedule(schedule: PatrolScheduleCreate):
                     schedule_id,
                     schedule.code.strip(),
                     schedule.planId,
+                    (schedule.operationalScheduleId or "").strip(),
                     schedule.startDate,
                     schedule.endDate or schedule.startDate,
                     schedule.startTime,
@@ -580,16 +862,65 @@ async def update_schedule(schedule_id: str, patch: PatrolScheduleUpdate):
     params = []
 
     async with get_db() as conn:
-        if not await _schedule_exists(conn, schedule_id):
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT * FROM active_patrol_schedules WHERE id = %s", (schedule_id,))
+            current = await cur.fetchone()
+        if current is None:
             raise HTTPException(status_code=404, detail="Patrol schedule not found")
+
+        current_op_id = str(current.get("operational_schedule_id") or "")
+        if patch.operationalScheduleId is not None:
+            new_op_id = (patch.operationalScheduleId or "").strip()
+            if current_op_id and new_op_id != current_op_id:
+                # The linked Operational Schedule is read-only after creation.
+                raise HTTPException(
+                    status_code=400,
+                    detail="The linked Operational Schedule cannot be changed after the patrol schedule has been created — edit it in Patrol Configuration instead",
+                )
+        resulting_op_id = (
+            (patch.operationalScheduleId or "").strip()
+            if patch.operationalScheduleId is not None
+            else current_op_id
+        )
+        resulting_plan_id = patch.planId if patch.planId is not None else str(current.get("plan_id") or "")
+        resulting_status = patch.status if patch.status is not None else str(current.get("status") or "draft")
+        resulting_start = patch.startDate if patch.startDate is not None else (_iso(current.get("start_date")) or "")
+        resulting_end = (
+            patch.endDate
+            if patch.endDate is not None
+            else (_iso(current.get("end_date")) or resulting_start)
+        )
+        resulting_start_time = patch.startTime if patch.startTime is not None else (_iso(current.get("start_time")) or "")
+        resulting_end_time = patch.endTime if patch.endTime is not None else (_iso(current.get("end_time")) or "")
+        resulting_freq = patch.frequency if patch.frequency is not None else str(current.get("frequency") or "one_time")
+        resulting_days = (
+            patch.frequencyDays
+            if patch.frequencyDays is not None
+            else _norm_json(current.get("frequency_days"), [])
+        )
+        # Re-validate the linkage on every update: a deleted/invalid
+        # Operational Schedule blocks the save, and the date/time window is
+        # enforced whenever the schedule is (or stays) activated.
+        await _validate_operational_link(
+            conn,
+            op_id_raw=resulting_op_id,
+            plan_id=resulting_plan_id,
+            start_date=resulting_start,
+            end_date=resulting_end,
+            start_time=resulting_start_time,
+            end_time=resulting_end_time,
+            frequency=resulting_freq,
+            frequency_days=resulting_days,
+            require_link=resulting_status != "draft",
+            enforce_window=resulting_status != "draft",
+        )
 
         if patch.code is not None:
             fields.append("code = %s")
             params.append(patch.code)
         if patch.planId is not None or patch.teamId is not None:
-            current = await _schedule_current(conn, schedule_id)
-            plan_id = patch.planId or current["plan_id"]
-            team_id = patch.teamId or current["team_id"]
+            plan_id = patch.planId or str(current.get("plan_id") or "")
+            team_id = patch.teamId or str(current.get("team_id") or "")
             await _validate_schedule_refs(conn, plan_id, team_id)
             if patch.planId is not None:
                 fields.append("plan_id = %s")
@@ -597,6 +928,9 @@ async def update_schedule(schedule_id: str, patch: PatrolScheduleUpdate):
             if patch.teamId is not None:
                 fields.append("team_id = %s")
                 params.append(patch.teamId)
+        if patch.operationalScheduleId is not None:
+            fields.append("operational_schedule_id = %s")
+            params.append((patch.operationalScheduleId or "").strip())
         if patch.startDate is not None:
             fields.append("start_date = %s")
             params.append(patch.startDate)

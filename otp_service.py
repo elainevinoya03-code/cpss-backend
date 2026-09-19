@@ -152,6 +152,12 @@ def public_settings(row: dict) -> dict:
     }
 
 
+def _normalize_app_password(value: str) -> str:
+    # Gmail displays App Passwords with spaces for readability
+    # ("abcd efgh ijkl mnop") but SMTP auth requires them without spaces.
+    return "".join((value or "").split())
+
+
 def _smtp_address(row: dict) -> Optional[str]:
     address = (row.get("gmail_address") or "").strip()
     if not address:
@@ -164,8 +170,11 @@ def _app_password(row: dict) -> Optional[str]:
     if stored:
         decrypted = decrypt_secret(stored)
         if decrypted:
-            return decrypted
-    return (get_settings().GMAIL_APP_PASSWORD or "").strip() or None
+            normalized = _normalize_app_password(decrypted)
+            if normalized:
+                return normalized
+    fallback = _normalize_app_password(get_settings().GMAIL_APP_PASSWORD or "")
+    return fallback or None
 
 
 def _utc(value) -> datetime:
@@ -390,6 +399,18 @@ async def issue_otp(conn, email: str, purpose: Optional[str] = None) -> dict:
             _smtp_send, email, row, address, password, code, expires_at, purpose
         )
     except Exception as exc:  # noqa: BLE001 — never leak SMTP details to clients
+        # Log the real SMTP cause server-side so "Test failed" is diagnosable
+        # via uvicorn logs without exposing secrets to the client.
+        import logging
+        logging.getLogger(__name__).exception(
+            "OTP SMTP send failed (host=%s port=%s security=%s from=%s to=%s): %s",
+            (row.get("smtp_host") or "smtp.gmail.com"),
+            row.get("smtp_port") or 587,
+            row.get("smtp_security") or "STARTTLS",
+            address,
+            email,
+            type(exc).__name__,
+        )
         async with conn.cursor() as cur:
             await cur.execute(
                 "UPDATE otp_records SET status = 'failed' WHERE id = %s", (record_id,)

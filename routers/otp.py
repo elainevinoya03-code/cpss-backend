@@ -138,7 +138,9 @@ async def put_settings(settings: OtpSettingsIn):
     sending a non-empty value replaces (encrypts) it.
     """
     _validate_settings(settings)
-    app_password = settings.gmailAppPassword.strip()
+    # Gmail shows App Passwords with spaces ("abcd efgh ijkl mnop") — strip
+    # all whitespace so SMTP auth works whether the user pastes with spaces or not.
+    app_password = "".join((settings.gmailAppPassword or "").split())
     app_password_encrypted = encrypt_secret(app_password) if app_password else ""
     async with get_db() as conn:
         return await _upsert_settings(conn, settings, app_password_encrypted)
@@ -171,6 +173,8 @@ async def send_test_otp(req: OtpSendIn):
             "message": e.message,
         }
     except Exception:  # noqa: BLE001 — surface a generic message, never internals
+        import logging
+        logging.getLogger(__name__).exception("Unexpected error in /api/otp/test")
         return {
             "success": False,
             "recipient": email,
