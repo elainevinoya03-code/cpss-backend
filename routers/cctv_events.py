@@ -37,20 +37,51 @@ class CctvEventCreate(BaseModel):
 
 class CctvEventOut(BaseModel):
     id: str
-    camera_id: str
-    camera_name: str
-    camera_location: str
-    camera_purok: str
-    category: str
+    camera_id: Optional[str] = ""
+    camera_name: Optional[str] = ""
+    camera_location: Optional[str] = ""
+    camera_purok: Optional[str] = ""
+    category: Optional[str] = ""
     notes: Optional[str] = None
-    timestamp: str
-    operator: str
-    incident_action: str
+    timestamp: Optional[str] = None
+    operator: Optional[str] = "CO-01"
+    incident_action: Optional[str] = "create_new"
     incident_id: Optional[str] = None
-    incident_status: str
-    created_at: str
-    updated_at: str
+    incident_status: Optional[str] = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
     incident: Optional[dict] = None
+
+
+# Self-heal DDL: if the production database was provisioned before migration
+# 020_create_cctv_events_table.sql was applied, SELECT/INSERT would raise
+# UndefinedTable -> FastAPI 500 -> browser reports it as a CORS failure
+# (no ACAO header on the error path / Render proxy error). Creating the
+# table IF NOT EXISTS keeps the endpoint at worst returning [].
+_ENSURE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS public.cctv_events (
+    id               TEXT          PRIMARY KEY,
+    camera_id        TEXT,
+    camera_name      TEXT          NOT NULL DEFAULT '',
+    camera_location  TEXT          NOT NULL DEFAULT '',
+    camera_purok     TEXT          NOT NULL DEFAULT '',
+    category         TEXT          NOT NULL DEFAULT '',
+    notes            TEXT,
+    timestamp        TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    operator         TEXT          NOT NULL DEFAULT 'CO-01',
+    incident_action  TEXT          NOT NULL DEFAULT 'create_new'
+                                  CHECK (incident_action IN ('create_new', 'link_existing')),
+    incident_id      TEXT,
+    incident_status  TEXT          NOT NULL DEFAULT 'Pending Desk Officer Triage',
+    created_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+"""
+
+
+async def _ensure_table(conn) -> None:
+    async with conn.cursor() as cur:
+        await cur.execute(_ENSURE_TABLE_SQL)
 
 
 def _iso(value):
@@ -65,6 +96,15 @@ def _row_to_event(row: dict) -> dict:
     out = dict(row)
     for key in ("timestamp", "created_at", "updated_at"):
         out[key] = _iso(out.get(key))
+    # Coerce NULLs to the tolerant defaults so response-model validation
+    # never 500s on legacy rows (e.g. camera_id NULL via FK SET NULL).
+    for key in (
+        "camera_id", "camera_name", "camera_location", "camera_purok",
+        "category", "operator", "incident_action", "incident_status",
+    ):
+        if out.get(key) is None:
+            out[key] = "" if key != "incident_action" else "create_new"
+    out.pop("incident", None)
     return out
 
 
@@ -228,9 +268,11 @@ async def _insert_incident(conn, incident: dict) -> None:
 
 
 @router.get("", response_model=List[CctvEventOut])
+@router.get("/", response_model=List[CctvEventOut], include_in_schema=False)
 async def list_cctv_events():
     """Return all persisted CCTV tag events, newest first."""
     async with get_db() as conn:
+        await _ensure_table(conn)
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT * FROM cctv_events ORDER BY timestamp DESC, id DESC"
@@ -240,6 +282,7 @@ async def list_cctv_events():
 
 
 @router.post("", response_model=CctvEventOut)
+@router.post("/", response_model=CctvEventOut, include_in_schema=False)
 async def create_cctv_event(event: CctvEventCreate):
     """Create a persisted CCTV tag event from the Surveillance Matrix.
 
@@ -259,6 +302,7 @@ async def create_cctv_event(event: CctvEventCreate):
     created_incident = None
 
     async with get_db() as conn:
+        await _ensure_table(conn)
         if event.incident_action == "create_new":
             incident_id = await _next_incident_id(conn)
             incident_status = "In Progress"

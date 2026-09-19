@@ -52,13 +52,16 @@ origins = [
     "http://127.0.0.1:3000",
     "https://cpss-frontend.vercel.app",
     "https://cpss.culiatpublicsafety.com",
+    "https://www.cpss.culiatpublicsafety.com",
 ]
 
 # Allow any local dev server port (e.g. flutter run -d chrome picks a
-# random port like 49359) plus Vercel preview deployments.
+# random port like 49359) plus Vercel preview deployments and the custom
+# production domain (apex + www + preview subdomains).
 origin_regex = (
     r"^https://cpss-frontend(-[a-z0-9-]+)?\.vercel\.app$"
     r"|^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+    r"|^https://([a-z0-9-]+\.)?culiatpublicsafety\.com$"
 )
 
 app.add_middleware(
