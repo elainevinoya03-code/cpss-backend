@@ -329,25 +329,29 @@ def _diagnose_camera(cfg: CameraDiagnose) -> dict:
             provided_user = (cfg.username or "").strip()
             provided_pass = cfg.password or ""
             # The live feed only proves connectivity for a camera that matches
-            # its endpoint AND presents the correct credentials — otherwise a
-            # wrong password would still be reported as a successful connection.
+            # its endpoint AND, if credentials are supplied, presents the
+            # correct ones. Verified cameras only store masked credentials, so a
+            # re-test sends no username/password — but the live feed is already
+            # authenticated and actively producing frames, which is itself proof
+            # of connectivity. A *wrong* supplied password still fails.
+            credentials_supplied = bool(provided_user or provided_pass)
             endpoint_matches_live = (
                 camera_stream is not None
                 and u.hostname == host
                 and (u.port or 554) == port
                 and (u.path or "/stream1") == path
             )
-            credentials_match = (
+            credentials_ok = (
                 expected_user == provided_user and expected_pass == provided_pass
             )
-            if endpoint_matches_live and not credentials_match:
+            if endpoint_matches_live and credentials_supplied and not credentials_ok:
                 reason = (
                     "Invalid credentials — the supplied username/password do not "
                     "match this camera's stream"
                 )
             living = (
                 endpoint_matches_live
-                and credentials_match
+                and (not credentials_supplied or credentials_ok)
                 and (camera_stream.seconds_since_frame() or 1e9) < 15
             )
         except Exception:
