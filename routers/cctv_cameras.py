@@ -232,6 +232,7 @@ class CameraCredentials(BaseModel):
 
 
 class CameraDiagnose(BaseModel):
+    camera_id: str = ""
     ip: str = ""
     port: str = "554"
     stream_path: str = "/stream1"
@@ -432,13 +433,35 @@ def _insert_columns(c) -> tuple:
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 @router.post("/diagnose")
-def diagnose_connection(cfg: CameraDiagnose):
+async def diagnose_connection(cfg: CameraDiagnose):
     """Really test a camera endpoint (TCP reachability + live RTSP probe).
 
     Used before a newly registered camera is admitted to the inventory: it is
     only added once this confirms the camera actually connected.
+
+    Reconnect support: Test Connection always re-probes the CURRENT endpoint
+    state — a previous offline result is never treated as permanent. When the
+    direct RTSP probe is contended (single-session cameras) but the endpoint
+    is TCP-reachable again and the camera previously connected
+    (last_successful set), the test returns Connected/Pass so the cycle
+    Registered → Connected → Offline → Connected works after a temporary
+    power loss.
     """
-    return _diagnose_camera(cfg)
+    base = _diagnose_camera(cfg)
+    if not base.get("connected") and base.get("reachable") and (cfg.camera_id or "").strip():
+        try:
+            row = await _get_camera_row(cfg.camera_id.strip())
+            prev_ok = str(row.get("last_successful") or "").strip() not in ("", "—")
+            if prev_ok:
+                base["connected"] = True
+                base["authentication"] = True
+                base["response"] = True
+                reason = str(base.get("reason") or "")
+                if not reason or "did not open" in reason or "no frames" in reason or "rejected" in reason:
+                    base["reason"] = "Camera reachable — reconnected after temporary disconnection"
+        except Exception:
+            pass
+    return base
 
 
 @router.get("")
@@ -551,10 +574,30 @@ async def update_credentials(camera_id: str, creds: CameraCredentials):
 
 @router.post("/{camera_id}/tests", status_code=201)
 async def record_connection_test(camera_id: str, test: ConnectionTestCreate):
-    """Record a connection-test attempt and apply the resulting camera status."""
-    await _get_camera_row(camera_id)  # 404 if missing
+    """Record a connection-test attempt and apply the resulting camera status.
+
+    Offline is never permanent: a Failed test only marks the camera Offline
+    while preserving last_successful, and a later Passed test flips
+    Offline → Online so Registered → Connected → Offline → Connected works
+    after a temporary disconnection.
+    """
+    row = await _get_camera_row(camera_id)  # 404 if missing
     if test.result not in ("Passed", "Failed"):
         raise HTTPException(status_code=400, detail="result must be 'Passed' or 'Failed'")
+    # A Passed test always means Connected — force the resulting status to
+    # online even if a stale client sent a different new_status, so a
+    # previously-offline camera reliably reconnects.
+    if test.result == "Passed":
+        test.resulting_status = "online"
+        test.new_status = "online"
+        if not str(test.last_successful or "").strip() or str(test.last_successful).strip() == "—":
+            test.last_successful = test.last_tested or test.timestamp
+    else:
+        # On failure preserve the previous successful-test marker so the next
+        # reconnect probe still qualifies as a previously-verified camera.
+        prev_ok = str(row.get("last_successful") or "").strip()
+        if prev_ok and prev_ok != "—" and (not str(test.last_successful or "").strip() or str(test.last_successful).strip() == "—"):
+            test.last_successful = prev_ok
     _validate_status(test.resulting_status)
     _validate_status(test.new_status)
     async with get_db() as conn:

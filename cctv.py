@@ -69,9 +69,12 @@ camera_stream = CameraStream()
 # liveness and reconciles the database status of the matching camera rows:
 #   * frames fresh (< RECONNECT_WINDOW) and camera not online  → mark online
 #   * frames stale (> OFFLINE_AFTER) and camera was online      → mark offline
-# It only touches cameras that connected successfully before (last_successful
-# set), so brand-new pending registrations still require the explicit
-# verification test and are never auto-admitted.
+# Offline is always temporary: an offline row flips back to online as soon as
+# fresh frames reappear (power back on), supporting the full cycle
+# Registered → Connected → Offline → Connected. It only touches cameras that
+# connected successfully before (last_successful set), so brand-new pending
+# registrations still require the explicit verification test and are never
+# auto-admitted.
 MONITOR_POLL_INTERVAL = 10
 RECONNECT_WINDOW_SECONDS = 15
 OFFLINE_AFTER_SECONDS = 45
