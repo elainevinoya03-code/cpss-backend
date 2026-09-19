@@ -9,7 +9,7 @@ router = APIRouter(prefix="/api/incidents", tags=["incidents"])
 # Valid statuses matching the frontend
 VALID_STATUSES = {"new", "acknowledged", "in_progress", "resolved", "closed_false_alarm"}
 VALID_SOURCES = {"resident", "tanod", "desk_officer", "cctv", "iot", "iot_cctv", "sos"}
-VALID_PRIORITIES = {"Low", "Medium", "High"}
+VALID_PRIORITIES = {"Low", "Medium", "High", "Emergency"}
 VALID_VERIFICATION_STATUSES = {"new", "under_review", "verified", "unverified"}
 
 # Complex query to fetch full incident with all related data.

@@ -1,6 +1,7 @@
 import cv2
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+from urllib.parse import urlparse
 
 router = APIRouter(tags=["cctv"])
 
@@ -13,6 +14,7 @@ import time
 class CameraStream:
     def __init__(self):
         self.frame = None
+        self.last_frame_at = None
         self.condition = threading.Condition()
         self.thread = threading.Thread(target=self._reader, daemon=True)
         self.thread.start()
@@ -30,6 +32,7 @@ class CameraStream:
                     if ret:
                         with self.condition:
                             self.frame = buffer.tobytes()
+                            self.last_frame_at = time.monotonic()
                             self.condition.notify_all()
             
             cap.release()
@@ -39,6 +42,13 @@ class CameraStream:
         with self.condition:
             self.condition.wait()
             return self.frame
+
+    def seconds_since_frame(self):
+        """None if no frame yet, else seconds since the latest live frame."""
+        with self.condition:
+            if self.last_frame_at is None:
+                return None
+            return time.monotonic() - self.last_frame_at
 
 camera_stream = CameraStream()
 
@@ -60,3 +70,20 @@ def video_feed():
         generate_frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
+
+
+@router.get("/api/cctv/live")
+def live_feed_info():
+    """Identify the camera that the backend ``/video_feed`` endpoint serves.
+
+    Lets read-only clients (e.g. the CCTV operator Surveillance Matrix) match
+    the single live MJPEG stream to its registered camera without hardcoding
+    the camera id or address in the frontend.
+    """
+    parsed = urlparse(RTSP_URL)
+    return {
+        "rtsp_url": RTSP_URL,
+        "ip": parsed.hostname or "",
+        "port": str(parsed.port or 554),
+        "stream_path": parsed.path or "",
+    }

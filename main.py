@@ -15,15 +15,30 @@ from routers.digital_boundaries import router as digital_boundaries_router
 from routers.patrol_configuration import router as patrol_configuration_router
 from routers.incidents import router as incidents_router
 from routers.roster_members import router as roster_members_router
+from routers.patrol_scheduling import router as patrol_scheduling_router
+from routers.announcements import router as announcements_router
+from routers.otp import router as otp_router
+from routers.cctv_cameras import router as cctv_cameras_router
+from routers.cctv_events import router as cctv_events_router
 
 from cctv import router as cctv_router
 
-# psycopg 3 async mode requires a SelectorEventLoop on Windows;
-# uvicorn's default ProactorEventLoop raises a RuntimeError/InterfaceError.
-# Applied at import time so `python main.py`, `python -m uvicorn main:app`, and
-# the STAT reloader worker (which imports this module) all get the policy.
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+def _selector_loop_factory(use_subprocess: bool = False):
+    """Return a SelectorEventLoop on Windows.
+
+    psycopg 3 async mode refuses to run on a ProactorEventLoop, and uvicorn 0.49
+    hard-codes ProactorEventLoop on Windows (uvicorn/loops/asyncio.py — its global
+    `asyncio.set_event_loop_policy` call is ignored there). uvicorn's
+    `Config.get_loop_factory()` accepts a dotted path to a custom factory, so point
+    `loop="main:_selector_loop_factory"` at this. The reloader's subprocess worker
+    re-imports main.py and receives the same loop via the config, which also fixes
+    the stuck reloader worker caused by ProactorEventLoop on startup.
+    """
+    if sys.platform == "win32":
+        return asyncio.SelectorEventLoop()
+    return asyncio.new_event_loop()
+
 
 app = FastAPI(title="CPSS Backend")
 
@@ -39,8 +54,12 @@ origins = [
     "https://cpss.culiatpublicsafety.com",
 ]
 
-# Allow Vercel preview deployments (e.g. cpss-frontend-git-main-cpss.vercel.app)
-origin_regex = r"^https://cpss-frontend(-[a-z0-9-]+)?\.vercel\.app$"
+# Allow any local dev server port (e.g. flutter run -d chrome picks a
+# random port like 49359) plus Vercel preview deployments.
+origin_regex = (
+    r"^https://cpss-frontend(-[a-z0-9-]+)?\.vercel\.app$"
+    r"|^http://(localhost|127\.0\.0\.1)(:\d+)?$"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,6 +77,11 @@ app.include_router(digital_boundaries_router)
 app.include_router(patrol_configuration_router)
 app.include_router(incidents_router)
 app.include_router(roster_members_router)
+app.include_router(patrol_scheduling_router)
+app.include_router(announcements_router)
+app.include_router(otp_router)
+app.include_router(cctv_cameras_router)
+app.include_router(cctv_events_router)
 app.include_router(cctv_router)
 
 
@@ -137,4 +161,12 @@ async def health_check(settings: Settings = Depends(get_settings)):
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    # loop="main:_selector_loop_factory" forces a SelectorEventLoop on Windows so
+    # psycopg async can run (uvicorn would otherwise use ProactorEventLoop).
+    uvicorn.run(
+        "main:app",
+        host="127.0.0.1",
+        port=8000,
+        reload=True,
+        loop="main:_selector_loop_factory",
+    )
