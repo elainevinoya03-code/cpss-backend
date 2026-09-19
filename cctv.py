@@ -26,18 +26,25 @@ class CameraStream:
         while True:
             cap = cv2.VideoCapture(RTSP_URL, cv2.CAP_FFMPEG)
             if cap.isOpened():
+                # Bound how long open/read can block on a dead or half-open RTSP
+                # connection so offline/reconnect is detected quickly.
+                try:
+                    cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+                    cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000)
+                except Exception:
+                    pass
                 while True:
                     success, frame = cap.read()
                     if not success:
                         break
-                    
+
                     ret, buffer = cv2.imencode(".jpg", frame)
                     if ret:
                         with self.condition:
                             self.frame = buffer.tobytes()
                             self.last_frame_at = time.monotonic()
                             self.condition.notify_all()
-            
+
             cap.release()
             time.sleep(5)  # Wait before reconnecting
 
